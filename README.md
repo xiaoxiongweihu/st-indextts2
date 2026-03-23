@@ -21,7 +21,7 @@
 
 1. 将本仓库克隆或下载到 SillyTavern 的扩展目录：
    ```
-   SillyTavern/public/scripts/extensions/third-party/st-indextts2
+   https://github.com/xiaoxiongweihu/st-indextts2
    ```
 2. 启动 IndexTTS2 后端服务（默认端口 `7880`）
 3. 在 SillyTavern 扩展面板中启用 **IndexTTS2 Player**
