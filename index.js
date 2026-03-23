@@ -6,6 +6,7 @@
     const defaultSettings = {
         apiUrl: 'http://127.0.0.1:7880/v1/audio/speech',
         cloningUrl: 'http://127.0.0.1:7880/api/v1/indextts2_cloning',
+        voiceListUrl: 'http://127.0.0.1:7880/api/v1/voices', // 获取参考音频列表
         model: 'index-tts2',
         defaultVoice: 'default.wav',
         speed: 1.0,
@@ -13,6 +14,7 @@
         parsingMode: 'gal', // 'gal' | 'audiobook'
         enableInline: true, // 启用行内增强渲染
         autoInference: false, // 回复后自动推理
+        autoPlay: false, // 推理完成后自动播放（需要浏览器已有用户交互）
         cacheImportPath: '\\\\SillyTavern\\\\data\\\\TTSsound',
         // VN format: [角色|表情]|「对话」 or [旁白]|描述
         vnRegex: '^\\[([^\\]|]+)(?:\\|[^\\]]*)?\\]\\|(.+)$',
@@ -630,10 +632,24 @@
                 }
             } catch (_) { /* 格式错误时静默忽略 */ }
 
+            // 格式 A0: [角色]|[表情]:「对话」 或 [角色][表情]:「对话」（表情后可带冒号）
+            // 兼容: [王淑琴]|[职业微笑]:「...」 和 [王淑琴][职业微笑]:「...」
+            const pipeTagRegex = /^\s*\[([^\]\n]+)\]\s*(?:\|\s*)?\[[^\]]*\]\s*:?\s*([「""『](.*?)[」""』]|.+)\s*$/;
+            let match = trimmed.match(pipeTagRegex);
+            if (match) {
+                const character = (match[1] || '').replace(/\s+/g, ' ').trim();
+                const rawContent = (match[2] || '').trim();
+                const quoteInner = match[3];
+                const inner = quoteInner !== undefined ? quoteInner.trim() : rawContent;
+                if (character && inner) {
+                    return { character, dialogue: inner, rawContent, quoted: rawContent, isAction: false, isQuoted: quoteInner !== undefined, emotion };
+                }
+            }
+
             // 格式 A: [角色|表情]|「对话」 或 [角色]|「对话」，宽松 \s*
             // 新增：可选匹配情感向量 [角色|表情][情感向量]|「对话」
             const pipeRegex = /^\s*\[([^|\]\n]+)(?:\|[^\]\n]*)?\](?:\[[\d.,\s-]*\])?\s*\|\s*([「""『](.*?)[」""』])\s*$/;
-            let match = trimmed.match(pipeRegex);
+            match = trimmed.match(pipeRegex);
             if (match) {
                 const character = (match[1] || '').replace(/\s+/g, ' ').trim();
                 const quoted = (match[2] || '').trim();
@@ -901,7 +917,11 @@
         } catch (e) {
             cleanup();
             console.error('[IndexTTS2] Audio play error:', e);
-            if (window.toastr) window.toastr.error('播放失败: ' + e.message);
+            if (e.name === 'NotAllowedError') {
+                if (window.toastr) window.toastr.warning('浏览器已拦截自动播放，请先点击页面任意处，或手动点击播放按钮');
+            } else {
+                if (window.toastr) window.toastr.error('播放失败: ' + e.message);
+            }
         }
     }
 
@@ -911,40 +931,58 @@
     }
 
     // ==================== Voice Cloning ====================
-    async function cloneVoice(characterName, base64Audio) {
+    async function cloneVoice(characterName, base64Audio, originalFileName) {
         const settings = getSettings();
         console.log(`[IndexTTS2] Clone: ${characterName}, base64 len=${base64Audio.length}`);
 
         try {
-            const res = await fetch(settings.cloningUrl, {
+            // 将 base64 转换为 Blob，使用 multipart/form-data 上传到 /api/v1/upload
+            const byteString = atob(base64Audio);
+            const ab = new ArrayBuffer(byteString.length);
+            const ia = new Uint8Array(ab);
+            for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+            const blob = new Blob([ab], { type: 'audio/wav' });
+
+            // 直接使用原始文件名，不做任何重命名或过滤
+            const uploadFileName = originalFileName || (characterName + '.wav');
+
+            const formData = new FormData();
+            formData.append('file', blob, uploadFileName);
+
+            // 从 cloningUrl 提取 baseUrl，换用后端已有的 /api/v1/upload 接口
+            const baseUrl = (settings.cloningUrl || 'http://127.0.0.1:7880/api/v1/indextts2_cloning')
+                .replace(/\/api\/v1\/indextts2_cloning.*$/, '')
+                .replace(/\/+$/, '');
+            const uploadUrl = baseUrl + '/api/v1/upload';
+
+            console.log(`[IndexTTS2] Uploading to: ${uploadUrl}, filename: ${uploadFileName}`);
+
+            const res = await fetch(uploadUrl, {
                 method: 'POST',
                 mode: 'cors',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name: characterName,
-                    description: 'ST Clone',
-                    speaker_file_base64: base64Audio
-                })
+                body: formData
+                // 不手动设置 Content-Type，让浏览器自动附加 multipart boundary
             });
 
             const text = await res.text();
-            console.log(`[IndexTTS2] Clone response: ${res.status}`, text);
+            console.log(`[IndexTTS2] Upload response: ${res.status}`, text);
 
             if (!res.ok) {
-                if (window.toastr) window.toastr.error(`克隆失败 HTTP ${res.status}`);
+                if (window.toastr) window.toastr.error(`上传失败 HTTP ${res.status}: ${text}`);
                 return null;
             }
 
             const data = JSON.parse(text);
-            const id = data.id || data.voice_id || data.filename || data.name;
+            // 后端返回 { filename, path, message }，用 filename 作为音色 ID
+            const id = data.filename || data.id || data.voice_id || data.name;
             if (id) {
-                if (window.toastr) window.toastr.success(`克隆成功: ${id}`);
+                if (window.toastr) window.toastr.success(`参考音频上传成功: ${id}`);
                 return id;
             }
             return null;
         } catch (e) {
             console.error('[IndexTTS2] Clone Error:', e);
-            if (window.toastr) window.toastr.error('克隆失败: ' + e.message);
+            if (window.toastr) window.toastr.error('上传失败: ' + e.message);
             return null;
         }
     }
@@ -970,10 +1008,9 @@
                 <div class="indextts-char-row" data-char="${char}">
                     <div class="indextts-char-name" title="${char}">${char}</div>
                     <div class="indextts-char-audio">
-                        <div class="indextts-drop-area ${isConfigured ? 'configured' : ''}" data-char="${char}">
-                            <span class="indextts-drop-text">${voice || '未配置 (拖拽上传)'}</span>
-                            <input type="file" class="indextts-file-input" accept="audio/*" style="display:none;">
-                        </div>
+                        <select class="indextts-voice-select text_pole" data-char="${char}">
+                            <option value="">-- 加载中... --</option>
+                        </select>
                         <input type="text" class="indextts-voice-input text_pole" data-char="${char}" value="${voice || ''}" placeholder="文件名.wav">
                         <div class="indextts-del-btn" data-char="${char}" title="删除配置"><i class="fa-solid fa-trash"></i></div>
                     </div>
@@ -1173,36 +1210,61 @@
                     }
                 };
             });
-            // Inputs
+
+            // 手动输入框同步 voiceMap
             container.querySelectorAll('.indextts-voice-input').forEach(input => {
                 input.onchange = () => {
                     const char = input.dataset.char;
                     voiceMap[char] = input.value.trim();
-                    saveSettings(); // Save immediately on blur/change
+                    // 同步更新下拉框选中项
+                    const sel = container.querySelector(`.indextts-voice-select[data-char="${char}"]`);
+                    if (sel) {
+                        const opt = [...sel.options].find(o => o.value === input.value.trim());
+                        if (opt) sel.value = opt.value;
+                    }
+                    saveSettings();
                 };
             });
 
-            // Drag & Drop
-            container.querySelectorAll('.indextts-drop-area').forEach(area => {
-                const char = area.dataset.char;
-                const fileInput = area.querySelector('.indextts-file-input');
-                const dropText = area.querySelector('.indextts-drop-text');
-                const voiceInput = container.querySelector(`.indextts-voice-input[data-char="${char}"]`);
+            // 下拉选择框：从后端获取音频列表并填充
+            const settings = getSettings();
+            const voiceListUrl = settings.voiceListUrl || 'http://127.0.0.1:7880/api/v1/voices';
 
-                area.onclick = e => { if (e.target !== fileInput) fileInput?.click(); };
-                fileInput.onchange = async () => {
-                    const file = fileInput.files[0];
-                    if (file) await handleUpload(char, file, dropText, voiceInput);
-                };
-                area.ondragover = e => { e.preventDefault(); area.classList.add('dragover'); };
-                area.ondragleave = () => area.classList.remove('dragover');
-                area.ondrop = async e => {
-                    e.preventDefault();
-                    area.classList.remove('dragover');
-                    const file = e.dataTransfer.files[0];
-                    if (file) await handleUpload(char, file, dropText, voiceInput);
-                };
-            });
+            // 一次性拉取音频列表，填充所有 select
+            fetch(voiceListUrl, { mode: 'cors' })
+                .then(r => r.json())
+                .then(data => {
+                    // 后端返回 { voices: [...], directory: ... }
+                    const voices = Array.isArray(data) ? data : (data.voices || []);
+                    container.querySelectorAll('.indextts-voice-select').forEach(sel => {
+                        const char = sel.dataset.char;
+                        const currentVoice = voiceMap[char] || '';
+                        sel.innerHTML = '<option value="">-- 请选择参考音频 --</option>'
+                            + voices.map(v => {
+                                const name = typeof v === 'string' ? v : (v.filename || v.name || v);
+                                return `<option value="${name}"${name === currentVoice ? ' selected' : ''}>${name}</option>`;
+                            }).join('');
+                        // 如果当前值不在列表中但手动输入了，补一个 option
+                        if (currentVoice && !voices.some(v => (typeof v === 'string' ? v : (v.filename || v.name)) === currentVoice)) {
+                            sel.innerHTML += `<option value="${currentVoice}" selected>${currentVoice} (手动)</option>`;
+                        }
+                        sel.onchange = () => {
+                            const val = sel.value;
+                            voiceMap[char] = val;
+                            const voiceInput = container.querySelector(`.indextts-voice-input[data-char="${char}"]`);
+                            if (voiceInput) voiceInput.value = val;
+                            saveSettings();
+                        };
+                    });
+                })
+                .catch(() => {
+                    container.querySelectorAll('.indextts-voice-select').forEach(sel => {
+                        const char = sel.dataset.char;
+                        const currentVoice = voiceMap[char] || '';
+                        sel.innerHTML = `<option value="" disabled>⚠ 无法获取列表</option>`
+                            + (currentVoice ? `<option value="${currentVoice}" selected>${currentVoice}</option>` : '');
+                    });
+                });
         }
     }
 
@@ -1214,7 +1276,7 @@
 
         try {
             const base64 = await convertToWav(file);
-            const id = await cloneVoice(char, base64);
+            const id = await cloneVoice(char, base64, file.name);
             if (id) {
                 const finalId = ensureWavSuffix(id);
                 if (dropText) { dropText.textContent = finalId; dropText.className = 'indextts-drop-text success'; }
@@ -2327,6 +2389,14 @@
 
                 audio.play().catch(e => {
                     console.error('[IndexTTS2] Auto-play block?', e);
+                    // 浏览器自动播放策略拦截：提示用户手动点击，不继续跳轨
+                    if (e.name === 'NotAllowedError') {
+                        if (window.toastr) window.toastr.warning('浏览器已拦截自动播放，请先点击页面任意处，或手动点击播放按钮');
+                        // 标记播放按钮为已就绪，方便用户手动点击
+                        const playBtn = msg.querySelector('.indextts-play');
+                        if (playBtn) playBtn.classList.add('indextts-prepared');
+                        return;
+                    }
                     playTrack(index + 1);
                 });
             };
@@ -2380,6 +2450,34 @@
         });
     }
 
+
+    // ==================== Auto Play ====================
+    // 自动播放：推理完成后触发，处理浏览器自动播放限制
+    async function autoPlayMessage(msg) {
+        if (!msg) return;
+        const mesId = getMessageId(msg);
+        if (!mesId) return;
+
+        // 如果当前已有播放，不打断
+        if (currentPlayback.audio && !currentPlayback.audio.paused) {
+            console.log('[IndexTTS2] AutoPlay: skipped, audio already playing');
+            return;
+        }
+
+        const queue = audioCache[mesId] || [];
+        if (!queue.length) {
+            console.log('[IndexTTS2] AutoPlay: no audio in cache for', mesId);
+            return;
+        }
+
+        console.log('[IndexTTS2] AutoPlay: starting playback for', mesId);
+        try {
+            playMessageQueue(msg, null);
+        } catch (e) {
+            // 捕获同步异常（异步异常在 playMessageQueue 内部处理）
+            console.warn('[IndexTTS2] AutoPlay: playMessageQueue threw synchronously:', e);
+        }
+    }
 
     function refreshAllMessages() {
         document.querySelectorAll('.mes[is_user="false"]').forEach(msg => {
@@ -2469,6 +2567,10 @@
                                 <label>音色克隆地址</label>
                                 <input type="text" id="indextts-clone-url" class="text_pole" value="${settings.cloningUrl}">
                             </div>
+                            <div class="indextts-setting-row">
+                                <label>音频列表地址</label>
+                                <input type="text" id="indextts-voice-list-url" class="text_pole" value="${settings.voiceListUrl || 'http://127.0.0.1:7880/api/v1/voices'}">
+                            </div>
                              <div class="indextts-setting-row">
                                 <label>推理模型名称</label>
                                 <input type="text" id="indextts-model" class="text_pole" value="${settings.model}">
@@ -2517,6 +2619,10 @@
                              <div class="indextts-setting-row checkbox-row">
                                 <label for="indextts-auto-inference">回复后自动推理</label>
                                 <input type="checkbox" id="indextts-auto-inference"${settings.autoInference === true ? ' checked' : ''}>
+                            </div>
+                             <div class="indextts-setting-row checkbox-row">
+                                <label for="indextts-auto-play">推理后自动播放</label>
+                                <input type="checkbox" id="indextts-auto-play"${settings.autoPlay === true ? ' checked' : ''}>
                             </div>
                             <div class="indextts-setting-row">
                                 <label>默认朗读音色</label>
@@ -2577,6 +2683,7 @@
 
         bindInput('#indextts-url', 'apiUrl');
         bindInput('#indextts-clone-url', 'cloningUrl');
+        bindInput('#indextts-voice-list-url', 'voiceListUrl');
         bindInput('#indextts-model', 'model');
 
         // 2. Playback & Automation
@@ -2606,6 +2713,7 @@
         };
         bindCheckbox('#indextts-enable-inline', 'enableInline', true);
         bindCheckbox('#indextts-auto-inference', 'autoInference', false);
+        bindCheckbox('#indextts-auto-play', 'autoPlay', false);
 
         // Voice
         const voiceInput = panel.querySelector('#indextts-voice');
@@ -3051,6 +3159,10 @@
                                 if (msg) {
                                     console.log('[IndexTTS2] Auto-inferring for message', mesId);
                                     await inferMessageAudios(msg, null, true); // silent = true
+                                    // 自动播放：推理完成后立即播放，需要用户已有交互才能绕过浏览器限制
+                                    if (settings.autoPlay) {
+                                        await autoPlayMessage(msg);
+                                    }
                                 }
                             }
                         }, 500);
