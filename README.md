@@ -81,7 +81,7 @@ https://github.com/user-attachments/assets/bbcaed12-4d72-45fc-9404-a452b4b91ecf
 [角色] 对话内容
 ```
 
-建议开启**提示词注入**，引导 AI 统一使用第一种格式输出。
+必须开启**提示词注入**，引导 AI 统一使用第一种格式输出。
 
 提示词示例：
 ```
