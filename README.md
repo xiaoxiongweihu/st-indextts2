@@ -5,7 +5,7 @@
 最新添加了根据场景切换对应场景音，并支持场景循环功能。
 
 <details>
-<summary>场景背景音功能展示视频（NSFW）</summary>
+<summary>点此查看场景背景音功能展示视频（NSFW）</summary>
 
 https://github.com/user-attachments/assets/bbcaed12-4d72-45fc-9404-a452b4b91ecf
 
