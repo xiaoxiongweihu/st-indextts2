@@ -2,9 +2,16 @@
 
 基于 [indexTTS player](https://github.com/bronie-honkai/st-indextts2) 使用AI进行修改，让你的酒馆语音体验更加流畅。
 
+最新添加了根据场景切换对应场景音，并支持场景循环功能。
+
+场景背景音功能展示（NSFW）：
+https://github.com/user-attachments/assets/bbcaed12-4d72-45fc-9404-a452b4b91ecf
+
+
+
 另外分享自己搜集的一些参考音频和酒馆大佬分享的各种女性配音，基本满足所有音色。
 
-百度网盘:https://pan.baidu.com/s/1cl2HjNs4N5jSr_-KnfS71w?pwd=whze
+百度网盘:https://https://pan.baidu.com/s/1cl2HjNs4N5jSr_-KnfS71w?pwd=whze
 
 <img width="583" height="340" alt="image" src="https://github.com/user-attachments/assets/c2a764ef-34e3-41a2-b802-4f2c16bba375" />
 
