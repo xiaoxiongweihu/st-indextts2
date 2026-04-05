@@ -4,7 +4,7 @@
 
     // ==================== Default Settings ====================
     const defaultSettings = {
-        apiUrl: 'http://127.0.0.1:7880/v1/audio/speech',
+        apiUrl: 'http://127.0.0.1:7880/api/v1/tts/tasks',
         cloningUrl: 'http://127.0.0.1:7880/api/v1/indextts2_cloning',
         voiceListUrl: 'http://127.0.0.1:7880/api/v1/voices', // 获取参考音频列表
         model: 'index-tts2',
@@ -820,6 +820,29 @@
     }
 
     // ==================== VN / Audiobook Parsing ====================
+    // 8 维情感向量顺序：开心、愤怒、悲伤、恐惧、厌恶、忧郁、惊讶、平静
+    const textEmotionVectorMap = {
+        开心: '1,0,0,0,0,0,0,0',
+        愤怒: '0,1,0,0,0,0,0,0',
+        悲伤: '0,0,1,0,0,0,0,0',
+        恐惧: '0,0,0,1,0,0,0,0',
+        厌恶: '0,0,0,0,1,0,0,0',
+        忧郁: '0,0,0,0,0,1,0,0',
+        惊讶: '0,0,0,0,0,0,1,0',
+        平静: '0,0,0,0,0,0,0,1',
+    };
+
+    const textEmotionAliasMap = {
+        通常: '平静',
+    };
+
+    function getEmotionVectorFromText(label) {
+        const normalized = (label || '').trim().replace(/\s+/g, '');
+        if (!normalized) return null;
+        const canonical = textEmotionVectorMap[normalized] ? normalized : textEmotionAliasMap[normalized];
+        return canonical ? textEmotionVectorMap[canonical] : null;
+    }
+
     // 兼容: [角色|表情]|「对话」、[角色][表情] 对话、[角色] 内容（无引号），宽松空白
     function parseVNLine(text) {
         try {
@@ -831,8 +854,13 @@
             const trimmed = (text || '').trim().replace(/\s+/g, ' ').trim();
             if (!trimmed) return null;
 
-            // 提取可选的情感向量 [数字,数字,...]
+            // 优先提取显式情感向量 [数字,数字,...]，若缺失则尝试将文本表情映射为 8 维向量
             let emotion = null;
+            const applyTextEmotion = (label) => {
+                if (!emotion) {
+                    emotion = getEmotionVectorFromText(label);
+                }
+            };
             try {
                 const emotionMatch = trimmed.match(/\]\s*\[([\d.,\s-]+)\]/);
                 if (emotionMatch) {
@@ -845,11 +873,13 @@
             const m3 = trimmed.match(threeTagRegex);
             if (m3) {
                 const character = (m3[1] || '').replace(/\s+/g, ' ').trim();
+                const expression = (m3[2] || '').replace(/\s+/g, ' ').trim();
                 const scene = (m3[3] || '').replace(/\s+/g, ' ').trim();
                 const rawContent = (m3[4] || '').trim();
                 const quoteInner = m3[5];
                 const inner = quoteInner !== undefined ? quoteInner.trim() : rawContent;
                 if (character && inner) {
+                    applyTextEmotion(expression);
                     const r3 = { character, scene, dialogue: inner, rawContent, quoted: rawContent, isAction: false, isQuoted: quoteInner !== undefined, emotion };
                     console.log('[IndexTTS2][Ambient] parseVNLine 三标签命中 character=' + character + ' scene=' + scene + ' dialogue=' + inner);
                     return r3;
@@ -857,42 +887,48 @@
             }
             // 格式 A0: [角色]|[表情]:「对话」 或 [角色][表情]:「对话」（表情后可带冒号）
             // 兼容: [王淑琴]|[职业微笑]:「...」 和 [王淑琴][职业微笑]:「...」
-            const pipeTagRegex = /^\s*\[([^\]\n]+)\]\s*(?:\|\s*)?\[[^\]]*\]\s*:?\s*([「""『](.*?)[」""』]|.+)\s*$/;
+            const pipeTagRegex = /^\s*\[([^\]\n]+)\]\s*(?:\|\s*)?\[([^\]]*)\]\s*:?\s*([「""『](.*?)[」""』]|.+)\s*$/;
             let match = trimmed.match(pipeTagRegex);
             if (match) {
                 const character = (match[1] || '').replace(/\s+/g, ' ').trim();
-                const rawContent = (match[2] || '').trim();
-                const quoteInner = match[3];
+                const expression = (match[2] || '').replace(/\s+/g, ' ').trim();
+                const rawContent = (match[3] || '').trim();
+                const quoteInner = match[4];
                 const inner = quoteInner !== undefined ? quoteInner.trim() : rawContent;
                 if (character && inner) {
+                    applyTextEmotion(expression);
                     return { character, dialogue: inner, rawContent, quoted: rawContent, isAction: false, isQuoted: quoteInner !== undefined, emotion };
                 }
             }
 
             // 格式 A: [角色|表情]|「对话」 或 [角色]|「对话」，宽松 \s*
             // 新增：可选匹配情感向量 [角色|表情][情感向量]|「对话」
-            const pipeRegex = /^\s*\[([^|\]\n]+)(?:\|[^\]\n]*)?\](?:\[[\d.,\s-]*\])?\s*\|\s*([「""『](.*?)[」""』])\s*$/;
+            const pipeRegex = /^\s*\[([^|\]\n]+)(?:\|([^\]\n]*))?\](?:\[[\d.,\s-]*\])?\s*\|\s*([「""『](.*?)[」""』])\s*$/;
             match = trimmed.match(pipeRegex);
             if (match) {
                 const character = (match[1] || '').replace(/\s+/g, ' ').trim();
-                const quoted = (match[2] || '').trim();
-                const inner = (match[3] || '').trim();
+                const expression = (match[2] || '').replace(/\s+/g, ' ').trim();
+                const quoted = (match[3] || '').trim();
+                const inner = (match[4] || '').trim();
                 if (character && inner) {
+                    applyTextEmotion(expression);
                     return { character, dialogue: inner, rawContent: quoted, quoted, isAction: false, isQuoted: true, emotion };
                 }
             }
 
             // 格式 B: [角色][表情] 对话 或 [角色] 对话（无竖线）
             // 新增：可选匹配情感向量 [角色][表情][情感向量] 对话
-            const bracketRegex = /^\s*\[([^\]]+)\](?:\[[^\]]*\])?(?:\[[\d.,\s-]*\])?\s+(.+)\s*$/;
+            const bracketRegex = /^\s*\[([^\]]+)\](?:\[([^\]]*)\])?(?:\[[\d.,\s-]*\])?\s+(.+)\s*$/;
             match = trimmed.match(bracketRegex);
             if (match) {
                 const character = (match[1] || '').replace(/\s+/g, ' ').trim();
-                let content = (match[2] || '').trim();
+                const expression = (match[2] || '').replace(/\s+/g, ' ').trim();
+                let content = (match[3] || '').trim();
                 if (!character || !content) return null;
                 const quoteMatch = content.match(/^[「""『](.*?)[」""』]\s*$/);
                 const dialogue = quoteMatch ? quoteMatch[1].trim() : content;
                 if (!dialogue) return null;
+                applyTextEmotion(expression);
                 return { character, dialogue, rawContent: content, quoted: content, isAction: false, isQuoted: !!quoteMatch, emotion };
             }
 
@@ -949,6 +985,11 @@
             const cached = await AudioStorage.getAudio(hash);
             if (cached && cached.blob) {
                 console.log('[IndexTTS2] [Cache Hit]', hash);
+                console.log('[IndexTTS2] Emotion debug (cache hit):', {
+                    input: text,
+                    voice: normVoice,
+                    emotion,
+                });
                 return {
                     hash,
                     blob: cached.blob,
@@ -966,16 +1007,20 @@
 
         if (!allowFetch) {
             console.log('[IndexTTS2] Auto-inference disabled & cache miss, skipping API request.');
+            console.log('[IndexTTS2] Emotion debug (request skipped):', {
+                input: text,
+                voice: normVoice,
+                emotion,
+            });
             return null;
         }
 
         console.log('[IndexTTS2] [API Request]', hash);
         const payload = {
-            model: settings.model,
-            input: text,
-            voice: normVoice,
-            response_format: 'wav',
-            speed: speed,
+            text: text,
+            prompt_audio: normVoice,
+            clean_text: true,
+            max_text_tokens_per_segment: 120,
         };
         if (emotion) {
             const emoVec = emotion.split(',').map(v => parseFloat(v.trim()));
@@ -985,6 +1030,15 @@
                 payload.emo_weight = 0.6;
             }
         }
+
+        console.log('[IndexTTS2] TTS payload emotion debug:', {
+            text,
+            prompt_audio: normVoice,
+            emotion,
+            emo_control_method: payload.emo_control_method ?? null,
+            emo_vec: payload.emo_vec ?? null,
+            emo_weight: payload.emo_weight ?? null,
+        });
 
         try {
             const res = await fetch(settings.apiUrl, {
